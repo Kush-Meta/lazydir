@@ -41,13 +41,13 @@ A terminal user interface (TUI) for browsing and managing records in [AGNTCY Dir
 
 **[2] Filters** — collapsible categories (Skills, Domains, Modules, OASF version, Version, Author, Trusted / Verified); toggle options with `enter`/`space`; `/` to search across all categories by name, caption, or ID; `i` to open a popup with the OASF class hierarchy and description.
 
-**[3] Records** — filtered list showing name and version; most filters (skills, domains, modules, version, author, OASF version) are applied instantly client-side from a local cache — only Trusted/Verified requires a server round-trip; multi-version records auto-grouped under collapsible headers; `/` for live name filtering; `i` for record info popup (CID, annotations, schema version, created-at); `y` to yank/copy CID or full JSON; `r` to refetch from the server. The panel title shows a `[⟳ N ago]` indicator of how long ago the records were last synced.
+**[3] Records** — filtered list showing name and version; most filters (skills, domains, modules, version, author, OASF version) are applied instantly client-side from a local cache — only Trusted/Verified requires a server round-trip; multi-version records auto-grouped under collapsible headers; `/` for live name filtering; `i` for record info popup (CID, annotations, schema version, created-at); `y` to yank/copy CID or full JSON; `r` to refetch from the server. The panel title shows a `[⟳ N ago]` indicator of how long ago the records were last synced. Directory v1.8+ fills the list from indexed summaries without fetching full records; older servers use the existing full-record search. Opening a preview still fetches that record on demand.
 
 **[0] Preview** — syntax-highlighted JSON of the selected record; scrollable when focused.
 
 ## Prerequisites
 
-- **Go 1.26+**
+- **Go 1.27.2+** (required by Directory v1.8)
 - A running [AGNTCY Directory](https://github.com/agntcy/dir) server (local daemon or remote)
 
 To start a local daemon for testing:

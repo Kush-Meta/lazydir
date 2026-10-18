@@ -6,7 +6,9 @@ package dirclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
 	"strings"
 
 	corev1 "github.com/agntcy/dir/api/core/v1"
@@ -14,6 +16,8 @@ import (
 	searchv1 "github.com/agntcy/dir/api/search/v1"
 	"github.com/agntcy/dir/client"
 	"github.com/agntcy/oasf-sdk/pkg/decoder"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
@@ -43,8 +47,8 @@ const (
 )
 
 // RecordSummary is a lightweight representation of a directory record. It
-// exposes only the fields the TUI renders or filters on; everything else from
-// the wire record is discarded by extractSummary.
+// exposes only the fields the TUI renders or filters on. Legacy full records
+// are reduced to this shape by extractSummary.
 type RecordSummary struct {
 	CID           string
 	Name          string
@@ -186,6 +190,7 @@ func (q Query) toRPC() *searchv1.RecordQuery {
 const (
 	defaultFirstPageSize = 100
 	defaultBatchSize     = 50
+	maxSummaryPageSize   = 100
 )
 
 func (c *Client) firstPageSize() int {
@@ -220,17 +225,125 @@ type StreamCallbacks struct {
 	OnDone func(err error)
 }
 
-// Stream issues a single SearchRecords RPC with the supplied queries and
-// drains the returned server stream until the server closes it (EOF) or ctx
-// is cancelled. The first batch of records (sized by Client.FirstPageSize)
-// is delivered via OnFirstPage; remaining records arrive in OnBatch chunks
-// (sized by Client.BatchSize).
-//
-// No limit/offset is set on the RPC — the server decides how many records
-// to return. Once the gRPC stream is exhausted, OnDone(nil) fires.
-//
-// Callbacks fire on this goroutine; cancel ctx to stop reading at any time.
+// Stream pages through indexed metadata without pulling full records from OCI.
+// Older Directory servers without ListRecordSummaries use SearchRecords as a
+// compatibility fallback. Callbacks run on this goroutine; cancel ctx to stop.
 func (c *Client) Stream(ctx context.Context, queries []Query, cb StreamCallbacks) {
+	rpcQueries := make([]*searchv1.RecordQuery, 0, len(queries))
+	for _, q := range queries {
+		rpcQueries = append(rpcQueries, q.toRPC())
+	}
+
+	fps := c.firstPageSize()
+	bs := c.batchSize()
+	firstPage := make([]*RecordSummary, 0, fps)
+	batch := make([]*RecordSummary, 0, bs)
+	firstPageSent := false
+	var offset uint32
+
+	finish := func(err error) {
+		if !firstPageSent && cb.OnFirstPage != nil {
+			cb.OnFirstPage(firstPage)
+		} else if len(batch) > 0 && cb.OnBatch != nil {
+			cb.OnBatch(batch)
+		}
+		if cb.OnDone != nil {
+			cb.OnDone(err)
+		}
+	}
+
+	for {
+		if err := ctx.Err(); err != nil {
+			finish(err)
+			return
+		}
+
+		want := maxSummaryPageSize
+		if !firstPageSent {
+			want = fps - len(firstPage)
+		}
+		limit := uint32(min(want, maxSummaryPageSize))
+		resp, err := c.c.ListRecordSummaries(ctx, &searchv1.ListRecordSummariesRequest{
+			Queries: rpcQueries,
+			Limit:   &limit,
+			Offset:  &offset,
+		})
+		if status.Code(err) == codes.Unimplemented && offset == 0 {
+			c.streamFullRecords(ctx, queries, cb)
+			return
+		}
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				err = ctxErr
+			}
+			finish(fmt.Errorf("listing record summaries: %w", err))
+			return
+		}
+
+		page := resp.GetRecords()
+		if len(page) == 0 && resp.GetHasMore() {
+			finish(errors.New("directory returned an empty summary page with more records"))
+			return
+		}
+		if uint64(offset)+uint64(len(page)) > math.MaxUint32 {
+			finish(errors.New("summary offset exceeds uint32 range"))
+			return
+		}
+		offset += uint32(len(page))
+
+		for _, record := range page {
+			if record == nil {
+				continue
+			}
+			s := indexedSummary(record)
+			if !firstPageSent {
+				firstPage = append(firstPage, s)
+				if len(firstPage) == fps {
+					firstPageSent = true
+					if cb.OnFirstPage != nil {
+						cb.OnFirstPage(firstPage)
+					}
+				}
+				continue
+			}
+			batch = append(batch, s)
+			if len(batch) == bs {
+				if cb.OnBatch != nil {
+					cb.OnBatch(batch)
+				}
+				batch = make([]*RecordSummary, 0, bs)
+			}
+		}
+
+		if !resp.GetHasMore() {
+			finish(nil)
+			return
+		}
+	}
+}
+
+func indexedSummary(record *searchv1.RecordSummary) *RecordSummary {
+	cid := record.GetCid()
+	name := sanitizeField(record.GetName())
+	if name == "" && cid != "" {
+		name = cid[:min(20, len(cid))]
+	}
+
+	return &RecordSummary{
+		CID:           cid,
+		Name:          name,
+		Version:       sanitizeField(record.GetVersion()),
+		SchemaVersion: record.GetSchemaVersion(),
+		Authors:       append([]string(nil), record.GetAuthors()...),
+		Skills:        append([]string(nil), record.GetSkills()...),
+		Domains:       append([]string(nil), record.GetDomains()...),
+		Modules:       append([]string(nil), record.GetModules()...),
+	}
+}
+
+// streamFullRecords preserves the old behavior for Directory servers that do
+// not implement ListRecordSummaries.
+func (c *Client) streamFullRecords(ctx context.Context, queries []Query, cb StreamCallbacks) {
 	rpcQueries := make([]*searchv1.RecordQuery, 0, len(queries))
 	for _, q := range queries {
 		rpcQueries = append(rpcQueries, q.toRPC())

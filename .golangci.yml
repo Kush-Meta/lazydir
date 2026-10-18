@@ -13,6 +13,7 @@ linters:
     - err113
     - exhaustive
     - exhaustruct
+    - exhaustruct_v5
     - funcorder
     - funlen
     - gocognit
@@ -20,9 +21,11 @@ linters:
     - gochecknoglobals
     - gochecknoinits
     - gocritic
+    - goconst
     - godoclint
     - godot
     - godox
+    - gomodguard
     - gomoddirectives
     - gosec
     - inamedparam

@@ -311,7 +311,9 @@ func New(cfg Config) error {
 	defer close(uiStop)
 	go app.uiRefreshLoop(uiStop)
 
-	if err := g.MainLoop(); err != nil && !gocui.IsQuit(err) {
+	// MainLoop currently returns only on error, but retain the nil guard for
+	// future gocui versions that may return after a clean shutdown.
+	if err := g.MainLoop(); err != nil && !gocui.IsQuit(err) { //nolint:staticcheck
 		return fmt.Errorf("main loop: %w", err)
 	}
 
